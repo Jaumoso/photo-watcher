@@ -5,8 +5,7 @@ import time
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from PIL import Image
-from PIL.ExifTags import TAGS
+from PIL import Image, ExifTags
 
 SOURCE_DIRS = os.getenv("SOURCE_DIRS", "./source").split(",")
 SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
@@ -30,19 +29,28 @@ MONTHS = [
 #         return None
 
 def get_exif_date(file_path):
-    """Devuelve fecha EXIF de la imagen o None."""
+    """Intenta obtener la fecha EXIF de una imagen."""
     try:
         with Image.open(file_path) as img:
-            exif = img._getexif()
-            if not exif:
+            exif_data = img._getexif()
+            if not exif_data:
                 return None
-            for tag_id, value in exif.items():
-                tag = TAGS.get(tag_id, tag_id)
+            for tag_id, value in exif_data.items():
+                tag = ExifTags.TAGS.get(tag_id, tag_id)
                 if tag == "DateTimeOriginal":
                     return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
     except Exception:
         return None
     return None
+
+def get_file_date(file_path):
+    """Obtiene la fecha EXIF o la fecha del sistema."""
+    date = get_exif_date(file_path)
+    if date:
+        return date
+    # fallback: fecha de modificación del sistema
+    ts = os.path.getmtime(file_path)
+    return datetime.fromtimestamp(ts)
 
 def copy_to_destination(file_path):
     """Copia o actualiza la imagen según su fecha EXIF (si hay un cambio en el archivo)"""
@@ -51,9 +59,9 @@ def copy_to_destination(file_path):
     if not file_path.lower().endswith((".jpg", ".jpeg", ".png", ".heic", ".webp")):
         return  # ignorar archivos que no sean imagen
 
-    date = get_exif_date(file_path)
+    date = get_file_date(file_path)
     if not date:
-        print(f"[⚠️] Sin fecha EXIF: {file_path}")
+        print(f"[⚠️] Sin fecha válida (EXIF o otra): {file_path}")
         return
 
     year_folder = os.path.join(TARGET_BASE, str(date.year))
@@ -64,8 +72,13 @@ def copy_to_destination(file_path):
 
     # Solo copiar si no existe o si el origen es más reciente
     if not os.path.exists(dest_path) or os.path.getmtime(file_path) > os.path.getmtime(dest_path):
-        shutil.copy2(file_path, dest_path)
-        print(f"[✅] Copiado/actualizado: {dest_path}")
+        try:
+            shutil.copy2(file_path, dest_path)
+            print(f"[✅] Copiado/actualizado: {dest_path}")
+        except PermissionError:
+            print(f"[❌] No hay permisos para escribir: {dest_path}")
+        except Exception as e:
+            print(f"[❌] Error copiando {file_path} → {dest_path}: {e}")
     else:
         print(f"[=] Ya actualizado: {dest_path}")
 
