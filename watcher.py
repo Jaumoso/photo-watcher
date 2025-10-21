@@ -63,8 +63,9 @@ def copy_to_destination(file_path):
     if not date:
         print(f"[⚠️] Sin fecha válida (EXIF o otra): {file_path}")
         return
-
-    month_folder = os.path.join(TARGET_BASE, f"{MONTHS[date.month - 1]} {date.year}")
+    
+    year_folder = os.path.join(TARGET_BASE, str(date.year))
+    month_folder = os.path.join(year_folder, f"{MONTHS[date.month - 1]} {date.year}")
     os.makedirs(month_folder, exist_ok=True)
 
     dest_path = os.path.join(month_folder, os.path.basename(file_path))
