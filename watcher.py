@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 from PIL import Image
 from PIL.ExifTags import TAGS
 
-SOURCE_DIRS = os.getenv("SOURCE_DIR", "./source").split(",")
+SOURCE_DIRS = os.getenv("SOURCE_DIRS", "./source").split(",")
 SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
 TARGET_BASE = os.getenv("TARGET_BASE", "./target")
 

@@ -2,6 +2,7 @@ services:
   photo-watcher:
     image: ghcr.io/jaumoso/photo-watcher:latest
     container_name: photo-watcher
+    user: "1000:1000"
     restart: unless-stopped
     environment:
       - SOURCE_DIRS=/source # Add more if needed, comma separated
