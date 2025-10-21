@@ -28,4 +28,4 @@ ENV SOURCE_DIRS=/source
 ENV TARGET_BASE=/target
 
 # Comando por defecto
-CMD ["python", "watcher.py"]
+CMD ["python", "-u", "watcher.py"]
