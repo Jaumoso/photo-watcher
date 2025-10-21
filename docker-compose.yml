@@ -1,0 +1,13 @@
+services:
+  photo-watcher:
+    image: ghcr.io/jaumoso/photo-watcher:latest
+    container_name: photo-watcher
+    restart: unless-stopped
+    environment:
+      - SOURCE_DIRS=/source # Add more if needed, comma separated
+      - TARGET_BASE=/target
+    volumes:
+      ## Source - Add more if needed
+      - ./source:/source:ro
+      # Target
+      - ./target:/target:rw

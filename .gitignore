@@ -1,0 +1,5 @@
+.venv
+.env
+source
+target
+.DS_Store
