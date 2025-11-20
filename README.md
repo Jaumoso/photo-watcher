@@ -2,7 +2,7 @@
 
 MacOS/Linux
 
-```
+```sh
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -10,23 +10,29 @@ pip install -r requirements.txt
 
 Windows:
 
-```
-.venv\Scripts\activate
+```sh
 python3 -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ## Run
 
-`python watcher.py`
+```sh
+python watcher.py
+```
 
 ## Run with docker
 
-`docker compose -f docker-compose.dev.yml up`
+```sh
+docker compose -f docker-compose.dev.yml up
+```
 
 ## Run on any machine with docker
 
-`docker compose up -d`
+```sh
+docker compose up -d
+```
 
 # Current targer folder structure
 

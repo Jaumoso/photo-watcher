@@ -1,2 +1,2 @@
-watchdog
-Pillow
+watchdog==6.0.0
+Pillow==12.0.0
