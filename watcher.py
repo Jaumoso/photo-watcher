@@ -1,6 +1,7 @@
 import os
 import shutil
 import time
+from fnmatch import fnmatchcase
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -9,6 +10,7 @@ from PIL import Image, ExifTags
 SOURCE_DIRS = os.getenv("SOURCE_DIRS", "./source").split(",")
 SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
 TARGET_BASE = os.getenv("TARGET_BASE", "./target")
+IGNORE_FILES = os.getenv("IGNORE_FILES", "").split(",")
 
 MONTHS = [
     "01. Enero", "02. Febrero", "03. Marzo", "04. Abril",
@@ -64,8 +66,16 @@ def copy_to_destination(file_path):
     if not os.path.isfile(file_path):
         return
     
+    file_name = os.path.basename(file_path)
+
+    if IGNORE_FILES:
+        for pattern in IGNORE_FILES:
+            if fnmatchcase(file_name, pattern):
+                print(f"[🚫] Ignored file: {file_path}")
+                return
+    
     tmp_patterns = ("~syncthing~", ".syncthing.", ".tmp", ".part")
-    if any(p in os.path.basename(file_path) for p in tmp_patterns):
+    if any(p in file_name for p in tmp_patterns):
         return
 
     ext = file_path.lower()
@@ -81,8 +91,7 @@ def copy_to_destination(file_path):
     month_folder = os.path.join(year_folder, f"{MONTHS[date.month - 1]} {date.year}")
     os.makedirs(month_folder, exist_ok=True)
 
-    base_name = os.path.basename(file_path)
-    dest_path = os.path.join(month_folder, base_name)
+    dest_path = os.path.join(month_folder, file_name)
 
     # Handle duplicate filenames safely
     if os.path.exists(dest_path) and os.path.getmtime(file_path) <= os.path.getmtime(dest_path):
