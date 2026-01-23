@@ -20,6 +20,7 @@ SOURCE_DIRS = os.getenv("SOURCE_DIRS", "./source").split(",")
 SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
 TARGET_BASE = os.getenv("TARGET_BASE", "./target")
 IGNORE_FILES = os.getenv("IGNORE_FILES", "").split(",")
+IGNORE_FILES = [p.strip() for p in IGNORE_FILES if p.strip()]
 
 MONTHS = [
     "1. Enero", "2. Febrero", "3. Marzo", "4. Abril",
