@@ -1,11 +1,20 @@
 import os
 import shutil
 import time
+import logging
 from fnmatch import fnmatchcase
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from PIL import Image, ExifTags
+
+# Configurar logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 SOURCE_DIRS = os.getenv("SOURCE_DIRS", "./source").split(",")
 SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
@@ -35,7 +44,7 @@ def get_file_date(file_path):
                     except Exception:
                         continue
     except Exception as e:
-        print(f"[❌] Error reading EXIF from {file_path}: {e}")
+        logger.error(f"[❌] Error reading EXIF from {file_path}: {e}")
         return None
     return None
 
@@ -44,9 +53,9 @@ def safe_copy(src, dst):
     """Copy with overwrite protection and clear error reporting."""
     try:
         shutil.copy2(src, dst)
-        print(f"[✅] Copied/updated: {dst}")
+        logger.info(f"[✅] Copied/updated: {dst}")
     except Exception as e:
-        print(f"[❌] Error copying {src} → {dst}: {e}")
+        logger.error(f"[❌] Error copying {src} → {dst}: {e}")
 
 
 def is_file_stable(file_path):
@@ -57,7 +66,7 @@ def is_file_stable(file_path):
         size2 = os.path.getsize(file_path)
         return size1 == size2
     except Exception:
-        print(f"[❌] Error checking stability of {file_path}")
+        logger.error(f"[❌] Error checking stability of {file_path}")
         return False
 
 
@@ -71,7 +80,7 @@ def copy_to_destination(file_path):
     if IGNORE_FILES:
         for pattern in IGNORE_FILES:
             if fnmatchcase(file_name, pattern):
-                print(f"[🚫] Ignored file: {file_path}")
+                logger.info(f"[🚫] Ignored file: {file_path}")
                 return
     
     tmp_patterns = ("~syncthing~", ".syncthing.", ".tmp", ".part")
@@ -84,7 +93,7 @@ def copy_to_destination(file_path):
 
     date = get_file_date(file_path)
     if not date:
-        print(f"[⚠️] No EXIF date: {file_path}")
+        logger.warning(f"[⚠️] No EXIF date: {file_path}")
         return
 
     year_folder = os.path.join(TARGET_BASE, str(date.year))
@@ -95,7 +104,7 @@ def copy_to_destination(file_path):
 
     # Handle duplicate filenames safely
     if os.path.exists(dest_path) and os.path.getmtime(file_path) <= os.path.getmtime(dest_path):
-        print(f"[=] Already up to date: {dest_path}")
+        logger.info(f"[=] Already up to date: {dest_path}")
         return
 
     safe_copy(file_path, dest_path)
@@ -104,22 +113,22 @@ def copy_to_destination(file_path):
 class PhotoHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
-            print(f"[🆕] New file: {event.src_path}")
+            logger.info(f"[🆕] New file: {event.src_path}")
             copy_to_destination(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            print(f"[✏️] Modified: {event.src_path}")
+            logger.info(f"[✏️] Modified: {event.src_path}")
             copy_to_destination(event.src_path)
 
 
 if __name__ == "__main__":
     observers = []
-    print(f"📸 Monitoring: {SOURCE_DIRS}")
+    logger.info(f"📸 Monitoring: {SOURCE_DIRS}")
 
     for src in SOURCE_DIRS:
         if not os.path.exists(src):
-            print(f"[⚠️] Folder not found: {src}")
+            logger.warning(f"[⚠️] Folder not found: {src}")
             continue
 
         handler = PhotoHandler()
@@ -132,9 +141,9 @@ if __name__ == "__main__":
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n🛑 Stopping...")
+        logger.info("🛑 Stopping...")
         for obs in observers:
             obs.stop()
         for obs in observers:
             obs.join()
-        print("✅ Done.")
+        logger.info("✅ Done.")
