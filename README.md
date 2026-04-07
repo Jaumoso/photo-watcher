@@ -16,6 +16,13 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
+Linux (CachyOS fish terminal)
+
+```sh
+source .venv/bin/activate.fish
+python3 -m unittest test_watcher -v
+```
+
 ## Run
 
 ```sh

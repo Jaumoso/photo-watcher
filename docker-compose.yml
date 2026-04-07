@@ -5,11 +5,12 @@ services:
     user: "1000:1000"
     restart: unless-stopped
     environment:
-      - SOURCE_DIRS=/source # Add more if needed, comma separated
+      - SOURCE_DIRS=/source,/screenshots # Add more if needed, comma separated
       - TARGET_BASE=/target
       - IGNORE_FILES=.**,.trashed** # Add more patterns if needed, comma separated
     volumes:
       ## Source - Add more if needed
       - ./source:/source:ro
+      - ./screenshots:/screenshots:ro
       # Target
       - ./target:/target:rw
