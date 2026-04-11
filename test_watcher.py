@@ -17,11 +17,14 @@ from watcher import (
     get_media_date,
     get_video_metadata_date,
     is_supported_media,
+    is_require_date_dir,
     get_file_hash,
     find_target_matches,
     copy_to_destination,
     remove_from_destination,
     cleanup_empty_parent_dirs,
+    build_target_index,
+    retry_operation,
 )
 
 
@@ -250,6 +253,7 @@ class TestCopyFlow(unittest.TestCase):
         import watcher
         self.original_target_base = watcher.TARGET_BASE
         watcher.TARGET_BASE = self.target_dir
+        watcher._target_index.clear()
 
     def tearDown(self):
         shutil.rmtree(self.source_dir, ignore_errors=True)
@@ -314,6 +318,7 @@ class TestDeletionSync(unittest.TestCase):
         import watcher
         self.original_target_base = watcher.TARGET_BASE
         watcher.TARGET_BASE = self.target_dir
+        watcher._target_index.clear()
 
     def tearDown(self):
         shutil.rmtree(self.source_dir, ignore_errors=True)
@@ -400,6 +405,7 @@ class TestEmptyDirCleanup(unittest.TestCase):
         import watcher
         self.original_target_base = watcher.TARGET_BASE
         watcher.TARGET_BASE = self.temp_dir
+        watcher._target_index.clear()
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -448,6 +454,7 @@ class TestMultipleSources(unittest.TestCase):
         import watcher
         self.original_target_base = watcher.TARGET_BASE
         watcher.TARGET_BASE = self.target_dir
+        watcher._target_index.clear()
 
     def tearDown(self):
         shutil.rmtree(self.source1, ignore_errors=True)
@@ -478,6 +485,232 @@ class TestMultipleSources(unittest.TestCase):
         
         self.assertTrue(os.path.exists(target1))
         self.assertTrue(os.path.exists(target2))
+
+
+class TestRequireDateDirs(unittest.TestCase):
+    """Test REQUIRE_DATE_DIRS: skip mtime fallback for specified directories."""
+
+    def setUp(self):
+        self.source_dir = tempfile.mkdtemp()
+        self.whatsapp_dir = tempfile.mkdtemp()
+        self.target_dir = tempfile.mkdtemp()
+        import watcher
+        self.original_target_base = watcher.TARGET_BASE
+        self.original_require_date_dirs = watcher.REQUIRE_DATE_DIRS
+        watcher.TARGET_BASE = self.target_dir
+        watcher.REQUIRE_DATE_DIRS = [self.whatsapp_dir]
+        watcher._target_index.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.source_dir, ignore_errors=True)
+        shutil.rmtree(self.whatsapp_dir, ignore_errors=True)
+        shutil.rmtree(self.target_dir, ignore_errors=True)
+        import watcher
+        watcher.TARGET_BASE = self.original_target_base
+        watcher.REQUIRE_DATE_DIRS = self.original_require_date_dirs
+
+    def test_require_date_dir_no_exif_skipped(self):
+        """File in require_date_dir without EXIF should NOT be copied."""
+        img_path = os.path.join(self.whatsapp_dir, "IMG-20250410-WA0001.jpg")
+        TestWatcherFixtures.create_image_no_exif(img_path)
+        TestWatcherFixtures.set_file_mtime(img_path, "2026-04-10 12:00:00")
+
+        copy_to_destination(img_path)
+
+        # Should NOT exist anywhere in target
+        matches = find_target_matches("IMG-20250410-WA0001.jpg")
+        self.assertEqual(len(matches), 0)
+
+    def test_require_date_dir_with_exif_copied(self):
+        """File in require_date_dir WITH EXIF should be copied normally."""
+        img_path = os.path.join(self.whatsapp_dir, "photo_wa.jpg")
+        TestWatcherFixtures.create_image_with_exif(img_path, "2025:09:20 10:00:00")
+
+        copy_to_destination(img_path)
+
+        expected_path = os.path.join(
+            self.target_dir, "2025", "9. Septiembre 2025", "photo_wa.jpg"
+        )
+        self.assertTrue(os.path.exists(expected_path))
+
+    def test_non_require_date_dir_no_exif_uses_mtime(self):
+        """File in normal dir without EXIF should still use mtime (unchanged behavior)."""
+        img_path = os.path.join(self.source_dir, "screenshot.png")
+        TestWatcherFixtures.create_image_no_exif(img_path)
+        TestWatcherFixtures.set_file_mtime(img_path, "2026-04-07 15:30:00")
+
+        copy_to_destination(img_path)
+
+        expected_path = os.path.join(
+            self.target_dir, "2026", "4. Abril 2026", "screenshot.png"
+        )
+        self.assertTrue(os.path.exists(expected_path))
+
+    def test_require_date_dir_video_no_metadata_skipped(self):
+        """Video in require_date_dir without metadata should NOT be copied."""
+        vid_path = os.path.join(self.whatsapp_dir, "VID-20250410-WA0001.mp4")
+        TestWatcherFixtures.create_dummy_video(vid_path)
+        TestWatcherFixtures.set_file_mtime(vid_path, "2026-04-10 12:00:00")
+
+        copy_to_destination(vid_path)
+
+        matches = find_target_matches("VID-20250410-WA0001.mp4")
+        self.assertEqual(len(matches), 0)
+
+    def test_is_require_date_dir_detection(self):
+        """Verify is_require_date_dir correctly identifies files."""
+        file_in = os.path.join(self.whatsapp_dir, "photo.jpg")
+        file_out = os.path.join(self.source_dir, "photo.jpg")
+
+        self.assertTrue(is_require_date_dir(file_in))
+        self.assertFalse(is_require_date_dir(file_out))
+
+    def test_require_date_dir_exif_added_later(self):
+        """Simulate adding EXIF to a file: first skip, then copy on modify."""
+        img_path = os.path.join(self.whatsapp_dir, "wa_photo.jpg")
+        TestWatcherFixtures.create_image_no_exif(img_path)
+
+        # First attempt: no EXIF → should not copy
+        copy_to_destination(img_path)
+        matches = find_target_matches("wa_photo.jpg")
+        self.assertEqual(len(matches), 0)
+
+        # Simulate user adding EXIF
+        TestWatcherFixtures.create_image_with_exif(img_path, "2025:03:15 09:00:00")
+
+        # Second attempt (on_modified would trigger this): now has EXIF → should copy
+        copy_to_destination(img_path)
+        expected_path = os.path.join(
+            self.target_dir, "2025", "3. Marzo 2025", "wa_photo.jpg"
+        )
+        self.assertTrue(os.path.exists(expected_path))
+
+
+class TestPathTraversal(unittest.TestCase):
+    """Test that path traversal attacks are blocked."""
+
+    def setUp(self):
+        self.source_dir = tempfile.mkdtemp()
+        self.target_dir = tempfile.mkdtemp()
+        import watcher
+        self.original_target_base = watcher.TARGET_BASE
+        watcher.TARGET_BASE = self.target_dir
+        watcher._target_index.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.source_dir, ignore_errors=True)
+        shutil.rmtree(self.target_dir, ignore_errors=True)
+        import watcher
+        watcher.TARGET_BASE = self.original_target_base
+
+    def test_traversal_filename_blocked(self):
+        """File with ../../ in name should not escape TARGET_BASE."""
+        malicious_name = "..%2F..%2Fetc%2Fpasswd.jpg"
+        img_path = os.path.join(self.source_dir, malicious_name)
+        TestWatcherFixtures.create_image_with_exif(img_path, "2025:06:01 12:00:00")
+
+        copy_to_destination(img_path)
+
+        # File should end up inside target, not outside
+        for root, _, files in os.walk(self.target_dir):
+            for f in files:
+                full = os.path.join(root, f)
+                common = os.path.commonpath([os.path.abspath(full), os.path.abspath(self.target_dir)])
+                self.assertEqual(common, os.path.abspath(self.target_dir))
+
+
+class TestRetryOperation(unittest.TestCase):
+    """Test retry logic with exponential backoff."""
+
+    def test_retry_succeeds_on_second_attempt(self):
+        """Verify retry succeeds after initial failure."""
+        call_count = {"n": 0}
+
+        def flaky_func():
+            call_count["n"] += 1
+            if call_count["n"] < 2:
+                raise IOError("Temporary failure")
+            return "success"
+
+        result = retry_operation(flaky_func, max_retries=3, base_delay=0.01)
+        self.assertEqual(result, "success")
+        self.assertEqual(call_count["n"], 2)
+
+    def test_retry_exhausted_raises(self):
+        """Verify exception is raised after all retries exhausted."""
+        def always_fail():
+            raise IOError("Permanent failure")
+
+        with self.assertRaises(IOError):
+            retry_operation(always_fail, max_retries=2, base_delay=0.01)
+
+    def test_retry_no_failure(self):
+        """Verify no retry needed when function succeeds immediately."""
+        call_count = {"n": 0}
+
+        def ok_func():
+            call_count["n"] += 1
+            return "ok"
+
+        result = retry_operation(ok_func, max_retries=3, base_delay=0.01)
+        self.assertEqual(result, "ok")
+        self.assertEqual(call_count["n"], 1)
+
+
+class TestTargetIndex(unittest.TestCase):
+    """Test in-memory target index."""
+
+    def setUp(self):
+        self.source_dir = tempfile.mkdtemp()
+        self.target_dir = tempfile.mkdtemp()
+        import watcher
+        self.original_target_base = watcher.TARGET_BASE
+        watcher.TARGET_BASE = self.target_dir
+
+    def tearDown(self):
+        shutil.rmtree(self.source_dir, ignore_errors=True)
+        shutil.rmtree(self.target_dir, ignore_errors=True)
+        import watcher
+        watcher.TARGET_BASE = self.original_target_base
+
+    def test_index_built_on_scan(self):
+        """Verify build_target_index populates the index."""
+        # Manually create files in target
+        month_dir = os.path.join(self.target_dir, "2025", "10. Octubre 2025")
+        os.makedirs(month_dir, exist_ok=True)
+        with open(os.path.join(month_dir, "photo.jpg"), "w") as f:
+            f.write("data")
+
+        build_target_index()
+        matches = find_target_matches("photo.jpg")
+        self.assertEqual(len(matches), 1)
+
+    def test_index_updated_on_copy(self):
+        """Verify index is updated when a file is copied."""
+        import watcher
+        watcher._target_index.clear()
+
+        img_path = os.path.join(self.source_dir, "indexed.jpg")
+        TestWatcherFixtures.create_image_with_exif(img_path, "2025:05:01 10:00:00")
+
+        copy_to_destination(img_path)
+        matches = find_target_matches("indexed.jpg")
+        self.assertEqual(len(matches), 1)
+
+    def test_index_updated_on_delete(self):
+        """Verify index is updated when a file is deleted."""
+        import watcher
+        watcher._target_index.clear()
+
+        img_path = os.path.join(self.source_dir, "deleteme.jpg")
+        TestWatcherFixtures.create_image_with_exif(img_path, "2025:06:01 12:00:00")
+        copy_to_destination(img_path)
+
+        self.assertEqual(len(find_target_matches("deleteme.jpg")), 1)
+
+        os.remove(img_path)
+        remove_from_destination(img_path)
+        self.assertEqual(len(find_target_matches("deleteme.jpg")), 0)
 
 
 if __name__ == "__main__":

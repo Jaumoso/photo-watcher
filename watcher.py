@@ -3,6 +3,7 @@ import shutil
 import time
 import logging
 import hashlib
+import threading
 from fnmatch import fnmatchcase
 from datetime import datetime
 from watchdog.observers import Observer
@@ -29,6 +30,18 @@ SOURCE_DIRS = [s.strip() for s in SOURCE_DIRS if s.strip()]
 TARGET_BASE = os.getenv("TARGET_BASE", "./target")
 IGNORE_FILES = os.getenv("IGNORE_FILES", "").split(",")
 IGNORE_FILES = [p.strip() for p in IGNORE_FILES if p.strip()]
+REQUIRE_DATE_DIRS = os.getenv("REQUIRE_DATE_DIRS", "").split(",")
+REQUIRE_DATE_DIRS = [d.strip() for d in REQUIRE_DATE_DIRS if d.strip()]
+FILE_STABILITY_DELAY = float(os.getenv("FILE_STABILITY_DELAY", "0.2"))
+
+# In-memory index: {filename: [target_paths]}
+_target_index = {}
+_target_index_lock = threading.Lock()
+
+# Debounce state: {file_path: Timer}
+_debounce_timers = {}
+_debounce_lock = threading.Lock()
+DEBOUNCE_DELAY = float(os.getenv("DEBOUNCE_DELAY", "2.0"))
 
 MONTHS = [
     "1. Enero", "2. Febrero", "3. Marzo", "4. Abril",
@@ -107,6 +120,16 @@ def get_video_metadata_date(file_path):
         return None
 
 
+def is_require_date_dir(file_path):
+    """Check if file_path belongs to a directory that requires embedded date metadata."""
+    abs_path = os.path.abspath(file_path)
+    for d in REQUIRE_DATE_DIRS:
+        abs_dir = os.path.abspath(d)
+        if abs_path.startswith(abs_dir + os.sep) or abs_path.startswith(abs_dir + "/"):
+            return True
+    return False
+
+
 def get_media_date(file_path):
     """Returns the date used for target placement: EXIF for images, video metadata, or file mtime."""
     # Try EXIF for images first
@@ -120,6 +143,11 @@ def get_media_date(file_path):
         if video_date:
             logger.info(f"[ℹ️] Video creation date: {file_path} → {video_date}")
             return video_date
+
+    # Skip mtime fallback for dirs that require embedded date metadata
+    if is_require_date_dir(file_path):
+        logger.info(f"[⏳] No embedded date for {file_path} (require_date_dir), skipping mtime fallback")
+        return None
 
     # Fall back to file modification time
     try:
@@ -150,10 +178,23 @@ def get_file_hash(file_path):
 
 
 
+def retry_operation(func, *args, max_retries=3, base_delay=1, **kwargs):
+    """Retry an operation with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            logger.warning(f"[🔄] Retry {attempt + 1}/{max_retries} for {func.__name__} after {delay}s: {e}")
+            time.sleep(delay)
+
+
 def safe_copy(src, dst):
-    """Copy with overwrite protection and clear error reporting."""
+    """Copy with overwrite protection, clear error reporting, and retry."""
     try:
-        shutil.copy2(src, dst)
+        retry_operation(shutil.copy2, src, dst)
         logger.info(f"[✅] Copied/updated: {dst}")
     except Exception as e:
         logger.error(f"[❌] Error copying {src} → {dst}: {e}")
@@ -163,23 +204,46 @@ def is_file_stable(file_path):
     """Avoid processing files still being written by Syncthing."""
     try:
         size1 = os.path.getsize(file_path)
-        time.sleep(0.2)
+        time.sleep(FILE_STABILITY_DELAY)
         size2 = os.path.getsize(file_path)
         return size1 == size2
     except Exception:
         return False
 
 
-def find_target_matches(file_name):
-    matches = []
+def _index_add(file_name, target_path):
+    """Add a file to the in-memory target index."""
+    with _target_index_lock:
+        if file_name not in _target_index:
+            _target_index[file_name] = []
+        if target_path not in _target_index[file_name]:
+            _target_index[file_name].append(target_path)
+
+
+def _index_remove(file_name, target_path):
+    """Remove a file from the in-memory target index."""
+    with _target_index_lock:
+        if file_name in _target_index:
+            _target_index[file_name] = [p for p in _target_index[file_name] if p != target_path]
+            if not _target_index[file_name]:
+                del _target_index[file_name]
+
+
+def build_target_index():
+    """Scan TARGET_BASE and build the in-memory index."""
+    with _target_index_lock:
+        _target_index.clear()
     if not os.path.isdir(TARGET_BASE):
-        return matches
-
+        return
     for root, _, files in os.walk(TARGET_BASE):
-        if file_name in files:
-            matches.append(os.path.join(root, file_name))
+        for f in files:
+            _index_add(f, os.path.join(root, f))
+    logger.info(f"[📇] Target index built: {sum(len(v) for v in _target_index.values())} files")
 
-    return matches
+
+def find_target_matches(file_name):
+    with _target_index_lock:
+        return list(_target_index.get(file_name, []))
 
 
 def cleanup_empty_parent_dirs(path):
@@ -221,6 +285,7 @@ def remove_from_destination(file_path):
                 logger.info(f"[ℹ️] Source unavailable for hash verification, deleting {file_name} from target")
             
             os.remove(target_path)
+            _index_remove(file_name, target_path)
             logger.info(f"[✅] Removed from target: {target_path}")
             cleanup_empty_parent_dirs(os.path.dirname(target_path))
         except Exception as e:
@@ -258,42 +323,75 @@ def copy_to_destination(file_path):
 
     dest_path = os.path.join(month_folder, file_name)
 
+    # Validate destination is within TARGET_BASE (prevent directory traversal)
+    if os.path.commonpath([os.path.abspath(dest_path), os.path.abspath(TARGET_BASE)]) != os.path.abspath(TARGET_BASE):
+        logger.warning(f"[⚠️] Path traversal blocked: {file_name} → {dest_path}")
+        return
+
     if os.path.exists(dest_path) and os.path.getmtime(file_path) <= os.path.getmtime(dest_path):
         logger.info(f"[=] Already up to date: {dest_path}")
         return
 
     safe_copy(file_path, dest_path)
+    _index_add(file_name, dest_path)
+
+
+def _debounced_process(file_path, action):
+    """Debounce file processing: only run action after DEBOUNCE_DELAY seconds of quiet."""
+    with _debounce_lock:
+        key = (file_path, action.__name__)
+        if key in _debounce_timers:
+            _debounce_timers[key].cancel()
+        timer = threading.Timer(DEBOUNCE_DELAY, action, args=[file_path])
+        _debounce_timers[key] = timer
+        timer.start()
+
+
+def _process_copy(file_path):
+    """Process a file for copying (used by debounce)."""
+    if is_file_stable(file_path):
+        copy_to_destination(file_path)
 
 
 class PhotoHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
-            logger.info(f"[🆕] New file: {event.src_path}")
-            if is_file_stable(event.src_path):
-                copy_to_destination(event.src_path)
+            try:
+                logger.info(f"[🆕] New file: {event.src_path}")
+                _debounced_process(event.src_path, _process_copy)
+            except Exception as e:
+                logger.error(f"[❌] Error processing new file {event.src_path}: {e}", exc_info=True)
 
     def on_modified(self, event):
         if not event.is_directory:
-            logger.info(f"[✏️] Modified: {event.src_path}")
-            if is_file_stable(event.src_path):
-                copy_to_destination(event.src_path)
+            try:
+                logger.info(f"[✏️] Modified: {event.src_path}")
+                _debounced_process(event.src_path, _process_copy)
+            except Exception as e:
+                logger.error(f"[❌] Error processing modified file {event.src_path}: {e}", exc_info=True)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            logger.info(f"[🗑️] Deleted: {event.src_path}")
-            remove_from_destination(event.src_path)
+            try:
+                logger.info(f"[🗑️] Deleted: {event.src_path}")
+                remove_from_destination(event.src_path)
+            except Exception as e:
+                logger.error(f"[❌] Error processing deleted file {event.src_path}: {e}", exc_info=True)
 
     def on_moved(self, event):
         if not event.is_directory:
-            logger.info(f"[🔄] Moved: {event.src_path} -> {event.dest_path}")
-            remove_from_destination(event.src_path)
-            if is_file_stable(event.dest_path):
-                copy_to_destination(event.dest_path)
+            try:
+                logger.info(f"[🔄] Moved: {event.src_path} -> {event.dest_path}")
+                remove_from_destination(event.src_path)
+                _debounced_process(event.dest_path, _process_copy)
+            except Exception as e:
+                logger.error(f"[❌] Error processing moved file {event.src_path}: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
     observers = []
     logger.info(f"📸 Monitoring: {SOURCE_DIRS}")
+    build_target_index()
 
     for src in SOURCE_DIRS:
         if not os.path.exists(src):

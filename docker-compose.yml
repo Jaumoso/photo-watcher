@@ -8,6 +8,7 @@ services:
       - SOURCE_DIRS=/source,/screenshots # Add more if needed, comma separated
       - TARGET_BASE=/target
       - IGNORE_FILES=.**,.trashed** # Add more patterns if needed, comma separated
+      - REQUIRE_DATE_DIRS=/source # Dirs where files without embedded date metadata are skipped
     volumes:
       ## Source - Add more if needed
       - ./source:/source:ro
